@@ -1740,11 +1740,7 @@ function clearAllData() {
 
 // ===== BUILT-IN DATA =====
 function loadBuiltinData() {
-  const raw = [
-    [1,"07-05-25",[["Ajosh Jose","13-11-22","29-02-23"],["Baby A P","29-03-23","07-05-25"]]],
-   
-    [2,"11-12-24",[["Jiju M Iype","13-08-23","11-12-24"]]],
-  ];
+  const raw = [];
 
   raw.forEach(([id, lc, asgns]) => {
     territories[id] = {
