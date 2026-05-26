@@ -340,7 +340,7 @@ textarea.form-control { min-height: 72px; resize: vertical; }
   </div>
   <div id="dashboard-attention"></div>
   <div class="section-label">Recently Assigned</div>
-  <div id="recent-list"><div class="loading"><div class="spinner"></div>Loading...</div></div>
+  <div id="recent-list"><div class="empty-state"><div class="emoji">&#x1F4CB;</div><p>Tap &#x21BB; to sync data from Google Sheets</p></div></div>
 </div>
 
 <!-- TERRITORIES -->
@@ -354,7 +354,7 @@ textarea.form-control { min-height: 72px; resize: vertical; }
       <option value="inactive">Not Done This Year</option>
     </select>
   </div>
-  <div id="territory-list"><div class="loading"><div class="spinner"></div>Loading...</div></div>
+  <div id="territory-list"><div class="empty-state"><div class="emoji">&#x1F4CD;</div><p>Tap &#x21BB; to sync data from Google Sheets</p></div></div>
 </div>
 
 <!-- REPORT -->
@@ -826,7 +826,7 @@ let bulkRowN  = 1;
 // INIT — no localStorage read for territories; only settings persist
 // =====================================================================
 function init() {
-  loadSettingsFromStorage();   // only UI prefs (cong name, service year, API keys)
+  loadSettingsFromStorage();
   populateSettingsUI();
   const now = new Date();
   document.getElementById('assign-date').value  = toISO(now);
@@ -834,7 +834,10 @@ function init() {
   document.getElementById('comment-date').value = toISO(now);
   populateServiceYears();
   updateHeaderSub();
-  syncData();                  // fetch everything fresh from Sheets
+  // Render page with empty state immediately — UI is never blocked by network
+  renderAll();
+  // Sync from Sheets in background
+  syncData();
 }
 
 // Settings (non-territory config) still live in localStorage for convenience
@@ -967,7 +970,9 @@ function renderDashboard() {
   document.getElementById('stat-overdue').textContent  = overdue.length;
 
   const attEl = document.getElementById('dashboard-attention');
-  if (inactive.length > 0) {
+  if (!all.length) {
+    attEl.innerHTML = ''; // no data yet, show nothing
+  } else if (inactive.length > 0) {
     const nums = inactive.slice(0,10).map(t=>t.id).join(', ');
     const more = inactive.length>10 ? ` +${inactive.length-10} more` : '';
     attEl.innerHTML = `<div class="attention-banner">
@@ -986,6 +991,11 @@ function renderDashboard() {
     }).slice(0,10);
 
   const el = document.getElementById('recent-list');
+  if (!Object.keys(territories).length) {
+    // No data yet — probably waiting for first sync
+    el.innerHTML='<div class="empty-state"><div class="emoji">&#x1F4E1;</div><p>Tap <strong>&#x21BB;</strong> in the top right to load data from Google Sheets</p></div>';
+    return;
+  }
   if (!recent.length) {
     el.innerHTML='<div class="empty-state"><div class="emoji">&#x1F4CB;</div><p>No territories currently assigned</p></div>';
     return;
@@ -1075,6 +1085,10 @@ function renderTerritories() {
     .sort((a,b)=>a.id-b.id);
 
   const el = document.getElementById('territory-list');
+  if (!Object.keys(territories).length) {
+    el.innerHTML='<div class="empty-state"><div class="emoji">&#x1F4E1;</div><p>Tap <strong>&#x21BB;</strong> in the top right to load territories from Google Sheets</p></div>';
+    return;
+  }
   if (!list.length) { el.innerHTML='<div class="empty-state"><div class="emoji">&#x1F50D;</div><p>No territories found</p></div>'; return; }
   el.innerHTML = list.map(t => {
     const la=getLastAssignment(t), status=getTerritoryStatus(t), inactive=isInactiveThisYear(t);
@@ -1723,7 +1737,7 @@ function generateS13PDF() {
       const last4=getLast4Assignments(t,from,to),lcText=t.lastCompleted?fmt(t.lastCompleted):'';
       const rowBg=rowIdx%2===0?[255,255,255]:[245,244,241];
       fillRect(ML,y,TW,NAME_H,rowBg);fillRect(X_T,y,W_T,ROW_H,LGRAY);txt(String(t.id),X_T+W_T/2,y+ROW_H/2+1.5,{size:8,bold:true,col:DARK,align:'center'});fillRect(X_L,y,W_L,ROW_H,[238,237,234]);txt(lcText,X_L+W_L/2,y+ROW_H/2+1.2,{size:7,col:DARK,align:'center'});
-      for(let g=0;g<4;g++){const slot=last4[g]||null,pubText=slot?(slot.publisher||')':'',maxChars=Math.floor(GW/1.85);txt(pubText.substring(0,maxChars),X_N(g)+GW/2,y+NAME_H/2+1.3,{size:7,bold:slot&&!slot.dateCompleted,col:BLACK,align:'center'});if(g<3)vline(X_N(g+1),y,y+ROW_H,0.4,[155,150,145]);}
+      for(let g=0;g<4;g++){const slot=last4[g]||null,pubText=slot?(slot.publisher||''):'',maxChars=Math.floor(GW/1.85);txt(pubText.substring(0,maxChars),X_N(g)+GW/2,y+NAME_H/2+1.3,{size:7,bold:slot&&!slot.dateCompleted,col:BLACK,align:'center'});if(g<3)vline(X_N(g+1),y,y+ROW_H,0.4,[155,150,145]);}
       hline(X_L+W_L,ML+TW,y+NAME_H,0.2,[210,205,200]);
       const dy=y+NAME_H;fillRect(X_L+W_L,dy,TW-W_T-W_L,DATE_H,rowBg);
       for(let g=0;g<4;g++){const slot=last4[g]||null,daText=slot&&slot.dateAssigned?fmt(slot.dateAssigned):'',dcText=slot&&slot.dateCompleted?fmt(slot.dateCompleted):'';txt(daText,X_DA(g)+GW/4,dy+DATE_H/2+1.2,{size:7,col:BLACK,align:'center'});txt(dcText,X_DC(g)+GW/4,dy+DATE_H/2+1.2,{size:7,col:BLACK,align:'center'});vline(X_DC(g),dy,dy+DATE_H,0.2,[195,190,185]);if(g<3)vline(X_N(g+1),dy,dy+DATE_H,0.4,[155,150,145]);}
@@ -1743,16 +1757,27 @@ async function syncData(silent) {
   btn.classList.add('syncing');
   if (!silent) showToast('Syncing with Google Sheets…');
 
+  // 15-second timeout using Promise.race (avoids AbortSignal cloning issues)
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('TIMEOUT')), 15000)
+  );
+
   try {
-    const resp = await fetch(settings.scriptUrl + '?action=getAll');
+    const resp = await Promise.race([
+      fetch(settings.scriptUrl + '?action=getAll'),
+      timeout
+    ]);
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
-    territories = {};          // wipe in-memory state before rebuild
+    territories = {};
     mergeSheetData(data);
     renderAll();
-    if (!silent) showToast('Sync complete!','success');
+    if (!silent) showToast('Sync complete!', 'success');
   } catch(e) {
-    showToast('Sync failed: '+e.message,'error');
+    const msg = e.message === 'TIMEOUT' ? 'Sync timed out — check your Apps Script URL' : 'Sync failed: ' + e.message;
+    showToast(msg, 'error');
+    // Render empty state so lists don't stay stuck on "Loading..."
+    renderAll();
   } finally {
     btn.classList.remove('syncing');
     btn.textContent = '\u21BB';
@@ -1809,20 +1834,33 @@ function mergeSheetData(data) {
 }
 
 // =====================================================================
-// POST TO SHEETS — awaitable, throws on network error
+// POST TO SHEETS
+// GAS deployed web apps redirect POSTs via 302 which browsers block in CORS mode.
+// We must use no-cors for the write (opaque response), then verify by re-syncing.
 // =====================================================================
 async function postToSheet(data) {
-  if (!settings.scriptUrl) throw new Error('Apps Script URL not configured');
-  // Note: do NOT use mode:'no-cors' — GAS deployed as "anyone" web app supports CORS
-  // no-cors gives opaque responses so errors are invisible; omitting it lets us read the response
-  const resp = await fetch(settings.scriptUrl, {
-    method:  'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // GAS requires text/plain for doPost
-    body:    JSON.stringify(data)
-  });
-  if (!resp.ok) throw new Error(`Sheet write failed: HTTP ${resp.status}`);
-  const result = await resp.json().catch(() => ({}));
-  if (result.status && result.status !== 'ok') throw new Error(result.message || 'Sheet returned error');
+  if (!settings.scriptUrl) throw new Error('Apps Script URL not configured. Go to Settings and save the Web App URL.');
+
+  // 15-second timeout using Promise.race (avoids AbortSignal cloning issues)
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('TIMEOUT')), 15000)
+  );
+
+  try {
+    await Promise.race([
+      fetch(settings.scriptUrl, {
+        method:  'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body:    JSON.stringify(data),
+        mode:    'no-cors',   // required: GAS redirects POST, browser blocks without this
+      }),
+      timeout
+    ]);
+    // no-cors = opaque response, we can't read status — treat no exception as success
+  } catch(e) {
+    if (e.message === 'TIMEOUT') throw new Error('Request timed out — check your Apps Script URL');
+    throw e;
+  }
 }
 
 // =====================================================================
