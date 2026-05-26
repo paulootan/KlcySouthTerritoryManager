@@ -468,195 +468,607 @@ textarea.form-control { min-height: 72px; resize: vertical; }
   <div class="settings-card">
     <h3>Google Apps Script Code</h3>
     <p style="font-size:12px;color:var(--gray);margin-bottom:8px;">Copy this into your Google Apps Script editor (Extensions &rarr; Apps Script) and deploy as a Web App. This version supports all read and write operations.</p>
-    <div class="code-block" id="apps-script-code">function doGet(e) {
+    <div class="code-block" id="apps-script-code">// ALL reads AND writes go through doGet.
+// Writes arrive as ?payload=&lt;URL-encoded JSON&gt;.
+// Deploy as Web App: Execute as Me, access Anyone.
+function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var action = e.parameter.action || 'getAll';
-  var result = {};
 
-  if (action === 'getAll') {
-    result.territories = sheetToJSON(ss.getSheetByName('Territories'));
-    result.assignments  = sheetToJSON(ss.getSheetByName('Assignments'));
-    result.comments     = sheetToJSON(ss.getSheetByName('Comments'));
+  // ── WRITE (payload present) ────────────────────────────────────
+  if (e.parameter.payload) {
+    var data   = JSON.parse(e.parameter.payload);
+    var action = data.action;
+
+    if (action === 'addAssignment') {
+      var aSheet = ss.getSheetByName('Assignments');
+      aSheet.appendRow([aSheet.getLastRow(), data.territory_id, data.assigned_to,
+                        data.date_assigned, data.date_completed || '', data.service_year || '']);
+      if (data.date_completed) updateLastCompleted(ss, data.territory_id, data.date_completed);
+    }
+
+    if (action === 'completeAssignment') {
+      updateAssignmentRow(ss, data.territory_id, data.publisher, data.date_assigned, data.date_completed);
+      updateLastCompleted(ss, data.territory_id, data.date_completed);
+    }
+
+    if (action === 'updateAssignment') {
+      var aS = ss.getSheetByName('Assignments');
+      var aD = aS.getDataRange().getValues();
+      for (var i = 1; i < aD.length; i++) {
+        if (String(aD[i][1]) === String(data.territory_id) &&
+            String(aD[i][3]) === String(data.old_date_assigned) &&
+            String(aD[i][2]) === String(data.old_publisher)) {
+          aS.getRange(i+1, 3).setValue(data.publisher);
+          aS.getRange(i+1, 4).setValue(data.date_assigned);
+          aS.getRange(i+1, 5).setValue(data.date_completed || '');
+          if (data.date_completed) updateLastCompleted(ss, data.territory_id, data.date_completed);
+          break;
+        }
+      }
+    }
+
+    if (action === 'deleteAssignment') {
+      var dS = ss.getSheetByName('Assignments');
+      var dD = dS.getDataRange().getValues();
+      for (var i = 1; i < dD.length; i++) {
+        if (String(dD[i][1]) === String(data.territory_id) &&
+            String(dD[i][3]) === String(data.date_assigned) &&
+            String(dD[i][2]) === String(data.publisher)) {
+          dS.deleteRow(i + 1); break;
+        }
+      }
+    }
+
+    if (action === 'upsertTerritory') {
+      var tS = ss.getSheetByName('Territories');
+      var tD = tS.getDataRange().getValues();
+      var found = false;
+      for (var i = 1; i < tD.length; i++) {
+        if (String(tD[i][0]) === String(data.territory_id)) {
+          if (data.last_completed) tS.getRange(i+1, 2).setValue(data.last_completed);
+          if (data.name !== undefined) tS.getRange(i+1, 3).setValue(data.name);
+          found = true; break;
+        }
+      }
+      if (!found) tS.appendRow([data.territory_id, data.last_completed || '', data.name || '']);
+    }
+
+    if (action === 'deleteTerritory') {
+      deleteRowsByTerritoryId(ss, 'Territories', data.territory_id, 0);
+      deleteRowsByTerritoryId(ss, 'Assignments', data.territory_id, 1);
+      deleteRowsByTerritoryId(ss, 'Comments',    data.territory_id, 1);
+    }
+
+    if (action === 'addComment') {
+      var cS = ss.getSheetByName('Comments');
+      cS.appendRow([cS.getLastRow(), data.territory_id,
+                    data.assignment_id || '', data.comment_text, data.comment_date]);
+    }
+
+    return ContentService
+      .createTextOutput(JSON.stringify({status:'ok'}))
+      .setMimeType(ContentService.MimeType.JSON);
   }
 
+  // ── READ (action=getAll) ───────────────────────────────────────
+  var result = {
+    territories: sheetToJSON(ss.getSheetByName('Territories')),
+    assignments:  sheetToJSON(ss.getSheetByName('Assignments')),
+    comments:     sheetToJSON(ss.getSheetByName('Comments'))
+  };
   return ContentService
     .createTextOutput(JSON.stringify(result))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function doPost(e) {
-  var ss   = SpreadsheetApp.getActiveSpreadsheet();
-  // Parse body — works whether Content-Type is application/json or text/plain
-  var raw  = e.postData ? e.postData.contents : '{}';
-  var data = JSON.parse(raw);
-  var action = data.action;
-
-  // ── ADD ASSIGNMENT ─────────────────────────────────────────────
-  if (action === 'addAssignment') {
-    var aSheet = ss.getSheetByName('Assignments');
-    var aId    = aSheet.getLastRow(); // row-based auto ID
-    aSheet.appendRow([
-      aId,
-      data.territory_id,
-      data.assigned_to,
-      data.date_assigned,
-      data.date_completed || '',
-      data.service_year   || ''
-    ]);
-    if (data.date_completed) {
-      updateLastCompleted(ss, data.territory_id, data.date_completed);
-    }
-  }
-
-  // ── COMPLETE ASSIGNMENT ────────────────────────────────────────
-  if (action === 'completeAssignment') {
-    updateAssignmentRow(ss, data.territory_id, data.publisher, data.date_assigned, data.date_completed);
-    updateLastCompleted(ss, data.territory_id, data.date_completed);
-  }
-
-  // ── UPDATE ASSIGNMENT (edit publisher / dates) ─────────────────
-  if (action === 'updateAssignment') {
-    var aS = ss.getSheetByName('Assignments');
-    var aD = aS.getDataRange().getValues();
-    for (var i = 1; i < aD.length; i++) {
-      if (String(aD[i][1]) === String(data.territory_id) &&
-          String(aD[i][3]) === String(data.old_date_assigned) &&
-          String(aD[i][2]) === String(data.old_publisher)) {
-        aS.getRange(i+1, 3).setValue(data.publisher);
-        aS.getRange(i+1, 4).setValue(data.date_assigned);
-        aS.getRange(i+1, 5).setValue(data.date_completed || '');
-        if (data.date_completed) {
-          updateLastCompleted(ss, data.territory_id, data.date_completed);
-        }
-        break;
-      }
-    }
-  }
-
-  // ── DELETE ASSIGNMENT ──────────────────────────────────────────
-  if (action === 'deleteAssignment') {
-    var dS = ss.getSheetByName('Assignments');
-    var dD = dS.getDataRange().getValues();
-    for (var i = 1; i < dD.length; i++) {
-      if (String(dD[i][1]) === String(data.territory_id) &&
-          String(dD[i][3]) === String(data.date_assigned) &&
-          String(dD[i][2]) === String(data.publisher)) {
-        dS.deleteRow(i + 1);
-        break;
-      }
-    }
-  }
-
-  // ── ADD / UPDATE TERRITORY ─────────────────────────────────────
-  if (action === 'upsertTerritory') {
-    var tS = ss.getSheetByName('Territories');
-    var tD = tS.getDataRange().getValues();
-    var found = false;
-    for (var i = 1; i < tD.length; i++) {
-      if (String(tD[i][0]) === String(data.territory_id)) {
-        if (data.last_completed) tS.getRange(i+1, 2).setValue(data.last_completed);
-        if (data.name !== undefined) tS.getRange(i+1, 3).setValue(data.name);
-        found = true; break;
-      }
-    }
-    if (!found) {
-      tS.appendRow([data.territory_id, data.last_completed || '', data.name || '']);
-    }
-  }
-
-  // ── DELETE TERRITORY (and its assignments + comments) ──────────
-  if (action === 'deleteTerritory') {
-    deleteRowsByTerritoryId(ss, 'Territories',  data.territory_id, 0);
-    deleteRowsByTerritoryId(ss, 'Assignments',  data.territory_id, 1);
-    deleteRowsByTerritoryId(ss, 'Comments',     data.territory_id, 1);
-  }
-
-  // ── ADD COMMENT ────────────────────────────────────────────────
-  if (action === 'addComment') {
-    var cS = ss.getSheetByName('Comments');
-    var cId = cS.getLastRow();
-    cS.appendRow([
-      cId,
-      data.territory_id,
-      data.assignment_id  || '',
-      data.comment_text,
-      data.comment_date
-    ]);
-  }
-
-  return ContentService
-    .createTextOutput(JSON.stringify({status:'ok'}))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-// ── HELPERS ────────────────────────────────────────────────────────
 function sheetToJSON(sheet) {
   if (!sheet) return [];
-  var data    = sheet.getDataRange().getValues();
-  var headers = data[0];
+  var data = sheet.getDataRange().getValues(), headers = data[0];
   return data.slice(1).map(function(row) {
-    var obj = {};
-    headers.forEach(function(h, i) { obj[h] = row[i]; });
-    return obj;
+    var obj = {}; headers.forEach(function(h,i){ obj[h]=row[i]; }); return obj;
   });
 }
 
 function updateLastCompleted(ss, tid, date) {
   if (!date) return;
-  var sheet = ss.getSheetByName('Territories');
-  var data  = sheet.getDataRange().getValues();
+  var sheet = ss.getSheetByName('Territories'), data = sheet.getDataRange().getValues();
   for (var i = 1; i < data.length; i++) {
-    if (String(data[i][0]) === String(tid)) {
-      sheet.getRange(i+1, 2).setValue(date);
-      return;
-    }
+    if (String(data[i][0]) === String(tid)) { sheet.getRange(i+1,2).setValue(date); return; }
   }
   sheet.appendRow([tid, date, '']);
 }
 
 function updateAssignmentRow(ss, tid, publisher, dateAssigned, dateCompleted) {
-  var sheet = ss.getSheetByName('Assignments');
-  var data  = sheet.getDataRange().getValues();
+  var sheet = ss.getSheetByName('Assignments'), data = sheet.getDataRange().getValues();
   for (var i = 1; i < data.length; i++) {
-    // Match by territory_id, publisher, and date_assigned — all three for accuracy
-    var rowTid  = String(data[i][1]).trim();
-    var rowPub  = String(data[i][2]).trim();
-    var rowDA   = String(data[i][3]).trim();
-    var rowDC   = data[i][4];
-    // Accept if date_completed is blank/null/empty (not yet completed)
-    var notDone = !rowDC || rowDC === '' || rowDC === null;
-    if (rowTid === String(tid) && rowPub === String(publisher) &&
-        rowDA === String(dateAssigned) && notDone) {
-      sheet.getRange(i+1, 5).setValue(dateCompleted);
-      return true;
+    var notDone = !data[i][4] || data[i][4] === '';
+    if (String(data[i][1]).trim()===String(tid) && String(data[i][2]).trim()===String(publisher) &&
+        String(data[i][3]).trim()===String(dateAssigned) && notDone) {
+      sheet.getRange(i+1,5).setValue(dateCompleted); return true;
     }
   }
-  // Fallback: match only territory + publisher if date didn't match (date format edge case)
   for (var i = 1; i < data.length; i++) {
-    var rowTid = String(data[i][1]).trim();
-    var rowPub = String(data[i][2]).trim();
-    var rowDC2 = data[i][4];
-    var notDone2 = !rowDC2 || rowDC2 === '' || rowDC2 === null;
-    if (rowTid === String(tid) && rowPub === String(publisher) && notDone2) {
-      sheet.getRange(i+1, 5).setValue(dateCompleted);
-      return true;
+    var notDone2 = !data[i][4] || data[i][4] === '';
+    if (String(data[i][1]).trim()===String(tid) && String(data[i][2]).trim()===String(publisher) && notDone2) {
+      sheet.getRange(i+1,5).setValue(dateCompleted); return true;
     }
   }
   return false;
 }
 
 function deleteRowsByTerritoryId(ss, sheetName, tid, colIndex) {
-  var sheet = ss.getSheetByName(sheetName);
-  if (!sheet) return;
+  var sheet = ss.getSheetByName(sheetName); if (!sheet) return;
   var data = sheet.getDataRange().getValues();
-  for (var i = data.length - 1; i >= 1; i--) {
-    if (String(data[i][colIndex]) === String(tid)) {
-      sheet.deleteRow(i + 1);
-    }
+  for (var i = data.length-1; i >= 1; i--) {
+    if (String(data[i][colIndex]) === String(tid)) sheet.deleteRow(i+1);
   }
-}</div>
-    <button class="btn btn-outline btn-sm" onclick="copyScript()" style="margin-top:8px;">&#x1F4CB; Copy Script</button>
+}</div>ng="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>JW KLCYS Territory Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
+<style>
+:root {
+  --navy: #1a2744;
+  --navy2: #253360;
+  --gold: #c8932a;
+  --gold-light: #f0c060;
+  --gold-pale: #fef9ed;
+  --cream: #faf7f2;
+  --white: #ffffff;
+  --gray: #6b7280;
+  --gray2: #9ca3af;
+  --light: #f3f0eb;
+  --border: #e5ddd0;
+  --green: #2d6a4f;
+  --green-light: #d1fae5;
+  --red: #9b2335;
+  --red-light: #fee2e2;
+  --orange: #c75b20;
+  --orange-light: #fef3c7;
+  --yellow: #d97706;
+  --shadow: 0 2px 16px rgba(26,39,68,0.10);
+  --shadow-lg: 0 4px 24px rgba(26,39,68,0.15);
+  --purple: #6b21a8;
+  --purple-light: #f3e8ff;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--cream);
+  color: var(--navy);
+  min-height: 100vh;
+  max-width: 480px;
+  margin: 0 auto;
+}
+h1,h2,h3,h4 { font-family: 'DM Serif Display', serif; }
+
+.header {
+  background: var(--navy);
+  color: var(--white);
+  padding: 16px 16px 12px;
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between;
+  box-shadow: 0 2px 12px rgba(26,39,68,0.3);
+}
+.header h1 { font-size: 19px; color: var(--gold-light); }
+.header-sub { font-size: 10px; color: rgba(255,255,255,0.5); text-transform: uppercase; letter-spacing: 0.6px; }
+.header-actions { display: flex; gap: 6px; }
+.icon-btn {
+  background: rgba(255,255,255,0.1);
+  border: none; color: var(--white);
+  width: 34px; height: 34px; border-radius: 9px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  font-size: 16px; transition: background 0.2s;
+}
+.icon-btn:hover { background: rgba(255,255,255,0.2); }
+.icon-btn.syncing { animation: spin 1s linear infinite; }
+
+.nav {
+  background: var(--white);
+  border-bottom: 1px solid var(--border);
+  display: flex; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none; position: sticky; top: 60px; z-index: 99;
+}
+.nav::-webkit-scrollbar { display: none; }
+.nav-btn {
+  flex: none; padding: 11px 16px;
+  border: none; background: none; color: var(--gray);
+  font-family: 'DM Sans', sans-serif; font-size: 13px; font-weight: 500;
+  cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
+  transition: all 0.2s;
+}
+.nav-btn.active { color: var(--navy); border-color: var(--gold); font-weight: 600; }
+
+.content { padding: 14px; padding-bottom: 90px; }
+.page { display: none; }
+.page.active { display: block; }
+
+.card {
+  background: var(--white); border-radius: 14px;
+  padding: 14px; margin-bottom: 10px;
+  box-shadow: var(--shadow); border: 1px solid var(--border);
+  cursor: pointer; transition: box-shadow 0.2s, transform 0.15s;
+}
+.card:active { transform: scale(0.99); }
+.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.terr-number {
+  background: var(--navy); color: var(--gold-light);
+  font-family: 'DM Serif Display', serif; font-size: 18px;
+  min-width: 42px; height: 42px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 6px;
+}
+.status-badge {
+  font-size: 10px; font-weight: 700; padding: 3px 9px;
+  border-radius: 20px; letter-spacing: 0.3px; white-space: nowrap;
+}
+.badge-green { background: var(--green-light); color: #065f46; }
+.badge-yellow { background: var(--orange-light); color: #92400e; }
+.badge-red { background: var(--red-light); color: #991b1b; }
+.badge-gray { background: var(--light); color: var(--gray); }
+
+.card-name { font-size: 14px; font-weight: 600; color: var(--navy); }
+.card-dates { font-size: 11px; color: var(--gray); margin-top: 2px; }
+.card-comment {
+  font-size: 11px; color: var(--gray); margin-top: 8px;
+  font-style: italic; background: var(--light); padding: 6px 10px;
+  border-radius: 8px; border-left: 3px solid var(--gold);
+}
+.card-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+
+.attention-banner {
+  background: var(--red-light); border: 1.5px solid #fca5a5;
+  border-radius: 12px; padding: 12px 14px; margin-bottom: 14px;
+  display: flex; align-items: center; gap: 10px;
+}
+.attention-banner .emoji { font-size: 22px; }
+.attention-banner p { font-size: 12px; color: #7f1d1d; line-height: 1.5; }
+.attention-banner strong { display: block; font-size: 13px; }
+
+.btn {
+  padding: 8px 13px; border-radius: 8px; border: none;
+  font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: all 0.18s;
+  display: flex; align-items: center; gap: 5px; white-space: nowrap;
+}
+.btn-primary { background: var(--navy); color: var(--white); }
+.btn-primary:hover { background: var(--navy2); }
+.btn-success { background: var(--green); color: var(--white); }
+.btn-danger { background: var(--red); color: var(--white); }
+.btn-warning { background: var(--orange); color: var(--white); }
+.btn-gold { background: var(--gold); color: var(--white); }
+.btn-outline { background: transparent; color: var(--navy); border: 1.5px solid var(--border); }
+.btn-outline:hover { background: var(--light); }
+.btn-sm { padding: 5px 10px; font-size: 11px; }
+.btn-full { width: 100%; justify-content: center; padding: 12px; font-size: 14px; }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.stat-card {
+  background: var(--white); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px; text-align: center; box-shadow: var(--shadow);
+}
+.stat-number { font-family: 'DM Serif Display', serif; font-size: 28px; color: var(--navy); }
+.stat-label { font-size: 10px; color: var(--gray); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+.stat-card.gold .stat-number { color: var(--gold); }
+.stat-card.green .stat-number { color: var(--green); }
+.stat-card.red .stat-number { color: var(--red); }
+.stat-card.orange .stat-number { color: var(--orange); }
+.stat-card.purple .stat-number { color: var(--purple); }
+.stat-card.clickable { cursor: pointer; transition: box-shadow 0.2s, transform 0.15s; }
+.stat-card.clickable:hover { box-shadow: var(--shadow-lg); transform: translateY(-2px); }
+.stat-card.clickable:active { transform: scale(0.97); }
+.stat-card .stat-tap { font-size: 9px; color: var(--gray2); margin-top: 3px; letter-spacing: 0.3px; }
+
+.search-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.search-input, .filter-select {
+  padding: 10px 13px; border: 1.5px solid var(--border); border-radius: 10px;
+  font-family: 'DM Sans', sans-serif; font-size: 13px;
+  background: var(--white); color: var(--navy); outline: none;
+}
+.search-input { flex: 1; }
+.search-input:focus, .filter-select:focus { border-color: var(--gold); }
+.filter-select { min-width: 115px; }
+
+.section-label {
+  font-size: 10px; font-weight: 700; color: var(--gray);
+  text-transform: uppercase; letter-spacing: 0.8px;
+  margin-bottom: 8px; margin-top: 4px;
+}
+
+.modal-overlay {
+  display: none; position: fixed; inset: 0;
+  background: rgba(26,39,68,0.55); z-index: 200;
+  align-items: flex-end; justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--white); border-radius: 20px 20px 0 0;
+  padding: 24px 18px; width: 100%; max-width: 480px;
+  max-height: 92vh; overflow-y: auto;
+  animation: slideUp 0.25s ease;
+}
+@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.modal-handle { width: 36px; height: 4px; background: var(--border); border-radius: 2px; margin: -10px auto 16px; }
+.modal h2 { font-size: 19px; margin-bottom: 14px; color: var(--navy); }
+
+.form-group { margin-bottom: 12px; }
+.form-group label {
+  display: block; font-size: 11px; font-weight: 600; color: var(--gray);
+  margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.4px;
+}
+.form-control {
+  width: 100%; padding: 10px 13px; border: 1.5px solid var(--border);
+  border-radius: 10px; font-family: 'DM Sans', sans-serif; font-size: 14px;
+  background: var(--white); color: var(--navy); outline: none;
+}
+.form-control:focus { border-color: var(--gold); }
+textarea.form-control { min-height: 72px; resize: vertical; }
+.form-row { display: flex; gap: 10px; }
+.form-row .form-group { flex: 1; }
+.form-error { font-size: 11px; color: var(--red); margin-top: 4px; }
+
+.last-comp-badge {
+  font-size: 10px; background: var(--light); color: var(--navy);
+  padding: 2px 7px; border-radius: 5px; display: inline-block; margin-top: 3px;
+}
+
+.history-item { display: flex; gap: 10px; margin-bottom: 10px; align-items: flex-start; }
+.history-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); margin-top: 5px; flex-shrink: 0; }
+.history-text { font-size: 12px; color: var(--gray); line-height: 1.6; }
+.history-text strong { color: var(--navy); font-size: 13px; }
+
+.report-controls { background: var(--white); border-radius: 14px; padding: 14px; margin-bottom: 12px; border: 1px solid var(--border); box-shadow: var(--shadow); }
+.report-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 8px; }
+.report-table th { background: var(--navy); color: var(--gold-light); padding: 7px 8px; text-align: left; font-size: 10px; }
+.report-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.report-table tr:nth-child(even) td { background: var(--light); }
+.report-table .inactive-row td { background: #fff1f2 !important; }
+
+.settings-card { background: var(--white); border-radius: 14px; padding: 14px; margin-bottom: 10px; border: 1px solid var(--border); }
+.settings-card h3 { font-size: 14px; margin-bottom: 12px; color: var(--navy); font-family: 'DM Serif Display', serif; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.settings-row:last-child { border-bottom: none; }
+
+.notice {
+  border-radius: 12px; padding: 12px 14px; margin-bottom: 12px;
+  font-size: 12px; line-height: 1.6;
+}
+.notice-gold { background: var(--gold-pale); border: 1.5px solid var(--gold); color: #7a5a00; }
+.notice-red { background: var(--red-light); border: 1.5px solid #fca5a5; color: #7f1d1d; }
+.notice-green { background: var(--green-light); border: 1.5px solid #6ee7b7; color: #064e3b; }
+.notice strong { display: block; margin-bottom: 3px; font-size: 13px; }
+
+.toast {
+  position: fixed; bottom: 24px; left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: var(--navy); color: var(--white);
+  padding: 11px 18px; border-radius: 11px; font-size: 13px; font-weight: 500;
+  z-index: 300; transition: transform 0.3s; white-space: nowrap;
+  box-shadow: 0 4px 20px rgba(26,39,68,0.3);
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
+.toast.success { background: var(--green); }
+.toast.error { background: var(--red); }
+
+.empty-state { text-align: center; padding: 40px 20px; color: var(--gray); }
+.empty-state .emoji { font-size: 44px; margin-bottom: 10px; }
+.empty-state p { font-size: 13px; }
+
+.loading { text-align: center; padding: 36px; color: var(--gray); }
+.spinner { width: 28px; height: 28px; border: 3px solid var(--border); border-top-color: var(--gold); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 10px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.fab {
+  position: fixed; bottom: 22px; right: 20px;
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--gold); color: var(--white); border: none;
+  font-size: 24px; cursor: pointer; box-shadow: 0 4px 20px rgba(200,147,42,0.4);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.fab:hover { transform: scale(1.08); }
+
+.tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.tab-btn { flex: 1; padding: 9px; border: none; background: none; font-family: 'DM Sans', sans-serif; font-size: 13px; color: var(--gray); cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
+.tab-btn.active { color: var(--navy); border-color: var(--gold); font-weight: 600; }
+
+.bulk-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.bulk-table th { background: var(--navy); color: var(--gold-light); padding: 6px 8px; text-align: left; }
+.bulk-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+.bulk-table tr:hover td { background: var(--light); }
+.bulk-table input { width: 100%; border: none; background: transparent; font-size: 11px; font-family: 'DM Sans', sans-serif; outline: none; color: var(--navy); padding: 2px 4px; }
+.bulk-table input:focus { background: var(--gold-pale); border-radius: 4px; }
+
+.inactive-card { border-left: 4px solid var(--red) !important; }
+.assigned-card { border-left: 4px solid var(--gold) !important; }
+
+.code-block { background: #1e1e2e; color: #cdd6f4; border-radius: 10px; padding: 12px; font-family: monospace; font-size: 10px; overflow-x: auto; white-space: pre; line-height: 1.6; margin-top: 8px; }
+
+/* Overlay blocker while saving */
+.saving-overlay {
+  position: fixed; inset: 0; background: rgba(26,39,68,0.35);
+  z-index: 400; display: none; align-items: center; justify-content: center;
+}
+.saving-overlay.show { display: flex; }
+.saving-box {
+  background: var(--white); border-radius: 16px; padding: 24px 32px;
+  text-align: center; box-shadow: var(--shadow-lg);
+}
+.saving-box p { font-size: 14px; color: var(--navy); margin-top: 10px; }
+
+@media print {
+  .header, .nav, .fab, .card-actions, .modal-overlay, .toast { display: none !important; }
+  body { max-width: 100%; }
+  .report-table td, .report-table th { font-size: 10px; padding: 5px 6px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>JW Territory Manager</h1>
+    <div class="header-sub" id="header-sub">Kolenchery South Congregation</div>
   </div>
+  <div class="header-actions">
+    <button class="icon-btn" id="sync-btn" onclick="syncData()" title="Sync with Google Sheets">&#x21BB;</button>
+    <button class="icon-btn" onclick="showPage('settings')" title="Settings">&#x2699;</button>
+  </div>
+</div>
+
+<div class="nav">
+  <button class="nav-btn active" onclick="showPage('dashboard')" id="nav-dashboard">Dashboard</button>
+  <button class="nav-btn" onclick="showPage('territories')" id="nav-territories">Territories</button>
+  <button class="nav-btn" onclick="showPage('report')" id="nav-report">Report</button>
+  <button class="nav-btn" onclick="showPage('data')" id="nav-data">Data Entry</button>
+  <button class="nav-btn" onclick="showPage('settings')" id="nav-settings">Settings</button>
+</div>
+
+<div class="content">
+
+<!-- DASHBOARD -->
+<div class="page active" id="page-dashboard">
+  <div class="stats-grid" style="grid-template-columns:1fr 1fr;">
+    <div class="stat-card clickable" onclick="openStatModal('total')"><div class="stat-number" id="stat-total">-</div><div class="stat-label">Total</div><div class="stat-tap">tap to view</div></div>
+    <div class="stat-card orange clickable" onclick="openStatModal('assigned')"><div class="stat-number" id="stat-assigned">-</div><div class="stat-label">Assigned</div><div class="stat-tap">tap to view</div></div>
+    <div class="stat-card green clickable" onclick="openStatModal('available')"><div class="stat-number" id="stat-available">-</div><div class="stat-label">Available</div><div class="stat-tap">tap to view</div></div>
+    <div class="stat-card red clickable" onclick="openStatModal('inactive')"><div class="stat-number" id="stat-inactive">-</div><div class="stat-label">Not Done This Year</div><div class="stat-tap">tap to view</div></div>
+    <div class="stat-card purple clickable" style="grid-column:1/-1;" onclick="openStatModal('overdue')"><div class="stat-number" id="stat-overdue">-</div><div class="stat-label">&#x23F0; Overdue &mdash; Held 4+ Months, Not Returned</div><div class="stat-tap">tap to view all overdue territories</div></div>
+  </div>
+  <div id="dashboard-attention"></div>
+  <div class="section-label">Recently Assigned</div>
+  <div id="recent-list"><div class="empty-state"><div class="emoji">&#x1F4CB;</div><p>Tap &#x21BB; to sync data from Google Sheets</p></div></div>
+</div>
+
+<!-- TERRITORIES -->
+<div class="page" id="page-territories">
+  <div class="search-row">
+    <input class="search-input" id="search-input" placeholder="Search territory or publisher..." oninput="renderTerritories()">
+    <select class="filter-select" id="filter-status" onchange="renderTerritories()">
+      <option value="">All</option>
+      <option value="available">Available</option>
+      <option value="assigned">Assigned</option>
+      <option value="inactive">Not Done This Year</option>
+    </select>
+  </div>
+  <div id="territory-list"><div class="empty-state"><div class="emoji">&#x1F4CD;</div><p>Tap &#x21BB; to sync data from Google Sheets</p></div></div>
+</div>
+
+<!-- REPORT -->
+<div class="page" id="page-report">
+  <div class="report-controls">
+    <h3 style="margin-bottom:12px;">&#x1F4CB; S-13 Territory Report</h3>
+    <div class="tabs">
+      <button class="tab-btn active" id="tab-sy" onclick="switchReportTab('sy')">Service Year</button>
+      <button class="tab-btn" id="tab-custom" onclick="switchReportTab('custom')">Custom Range</button>
+    </div>
+    <div id="report-sy-controls">
+      <div class="form-group">
+        <label>Service Year</label>
+        <select class="form-control" id="report-sy-select"></select>
+      </div>
+    </div>
+    <div id="report-custom-controls" style="display:none">
+      <div class="form-row">
+        <div class="form-group"><label>From</label><input type="date" class="form-control" id="report-from"></div>
+        <div class="form-group"><label>To</label><input type="date" class="form-control" id="report-to"></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px;">
+      <button class="btn btn-primary" style="flex:1" onclick="renderReportPreview()">&#x1F441; Preview</button>
+      <button class="btn btn-gold" style="flex:1" onclick="generateS13PDF()">&#x2B07; Download S-13 PDF</button>
+    </div>
+  </div>
+  <div id="report-preview"></div>
+</div>
+
+<!-- DATA ENTRY -->
+<div class="page" id="page-data">
+  <div class="tabs">
+    <button class="tab-btn active" id="tab-view" onclick="switchDataTab('view')">View / Edit</button>
+    <button class="tab-btn" id="tab-bulk" onclick="switchDataTab('bulk')">Bulk Import</button>
+  </div>
+  <div id="data-view-panel">
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <input class="search-input" id="data-search" placeholder="Search territory..." oninput="renderDataList()">
+      <button class="btn btn-primary btn-sm" onclick="openAddTerritoryModal()">+ New</button>
+    </div>
+    <div id="data-list"></div>
+  </div>
+  <div id="data-bulk-panel" style="display:none">
+    <div class="notice notice-gold">
+      <strong>&#x1F4E5; Bulk Historical Import</strong>
+      Paste or type historical assignment data below. Each row = one assignment. Dates: DD-MM-YYYY or YYYY-MM-DD. Click "Import All" when ready. All rows are written directly to Google Sheets.
+    </div>
+    <div style="overflow-x:auto;margin-bottom:10px;">
+      <table class="bulk-table" id="bulk-table">
+        <thead>
+          <tr>
+            <th>Terr #</th>
+            <th>Publisher</th>
+            <th>Date Assigned</th>
+            <th>Date Completed</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="bulk-tbody">
+          <tr>
+            <td><input placeholder="1" id="b0_t"></td>
+            <td><input placeholder="Publisher Name" id="b0_p"></td>
+            <td><input placeholder="01-09-2024" id="b0_a"></td>
+            <td><input placeholder="15-01-2025" id="b0_c"></td>
+            <td><button class="btn btn-danger btn-sm" onclick="removeBulkRow(this)">&#x2715;</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-outline btn-sm" onclick="addBulkRow()">+ Row</button>
+      <button class="btn btn-primary" onclick="importBulk()">&#x2B06; Import All</button>
+      <button class="btn btn-outline btn-sm" onclick="clearBulk()">Clear</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS -->
+<div class="page" id="page-settings">
+  <div class="notice notice-gold">
+    <strong>&#x1F4CA; Google Sheets — Live Source of Truth</strong>
+    All data is read from and written directly to Google Sheets. No local storage is used for territory data.
+  </div>
+
+  <div class="settings-card">
+    <h3>Congregation Info</h3>
+    <div class="form-group"><label>Congregation Name</label><input class="form-control" id="cong-name" placeholder="Kolenchery South Congregation"></div>
+    <div class="form-group"><label>Current Service Year (e.g. 2025)</label><input class="form-control" id="service-year" placeholder="2025" type="number"></div>
+    <button class="btn btn-outline btn-full" onclick="saveCongInfo()">Save Info</button>
+  </div>
+
+  <div class="settings-card">
+    <h3>Google Sheets Config</h3>
+    <div class="form-group"><label>Google Sheet ID</label><input class="form-control" id="sheet-id" placeholder="From URL: /spreadsheets/d/...../edit" readonly></div>
+    <div class="form-group"><label>Google API Key (read access)</label><input class="form-control" id="api-key" placeholder="AIza..." type="password" readonly></div>
+    <div class="form-group"><label>Apps Script Web App URL (read + write)</label><input readonly class="form-control" id="script-url" placeholder="https://script.google.com/macros/s/..."></div>
+    <button class="btn btn-primary btn-full" onclick="saveSettings()">&#x1F4BE; Save &amp; Connect</button>
+  </div>
+
+  <div class="settings-card">
+    <h3>Data Management</h3>
+    <p style="font-size:12px;color:var(--gray);margin-bottom:10px;">Export/import a JSON snapshot for offline backup. Territory data always lives in Google Sheets.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-outline" onclick="exportJSON()">&#x2B07; Export JSON Snapshot</button>
+      <button class="btn btn-outline" onclick="importJSON()">&#x2B06; Restore from JSON</button>
+    </div>
+    <input type="file" id="import-file" style="display:none" accept=".json" onchange="handleImport(event)">
+  </div>
+
+
 
   <div class="settings-card">
     <h3>About</h3>
@@ -1757,15 +2169,15 @@ async function syncData(silent) {
   btn.classList.add('syncing');
   if (!silent) showToast('Syncing with Google Sheets…');
 
-  // 15-second timeout using Promise.race (avoids AbortSignal cloning issues)
-  const timeout = new Promise((_, reject) =>
+  // 15-second timeout using Promise.race (AbortSignal can't be cloned across frames)
+  const syncTimeout = new Promise((_, reject) =>
     setTimeout(() => reject(new Error('TIMEOUT')), 15000)
   );
 
   try {
     const resp = await Promise.race([
       fetch(settings.scriptUrl + '?action=getAll'),
-      timeout
+      syncTimeout
     ]);
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
@@ -1834,29 +2246,23 @@ function mergeSheetData(data) {
 }
 
 // =====================================================================
-// POST TO SHEETS
-// GAS deployed web apps redirect POSTs via 302 which browsers block in CORS mode.
-// We must use no-cors for the write (opaque response), then verify by re-syncing.
+// WRITE TO SHEETS via GET + ?payload=
+// GAS doGet() does NOT issue a 302 redirect, so CORS works and we can read
+// the actual response. All write actions are sent as URL-encoded JSON.
 // =====================================================================
 async function postToSheet(data) {
   if (!settings.scriptUrl) throw new Error('Apps Script URL not configured. Go to Settings and save the Web App URL.');
 
-  // 15-second timeout using Promise.race (avoids AbortSignal cloning issues)
-  const timeout = new Promise((_, reject) =>
+  const url = settings.scriptUrl + '?payload=' + encodeURIComponent(JSON.stringify(data));
+  const writeTimeout = new Promise((_, reject) =>
     setTimeout(() => reject(new Error('TIMEOUT')), 15000)
   );
 
   try {
-    await Promise.race([
-      fetch(settings.scriptUrl, {
-        method:  'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body:    JSON.stringify(data),
-        mode:    'no-cors',   // required: GAS redirects POST, browser blocks without this
-      }),
-      timeout
-    ]);
-    // no-cors = opaque response, we can't read status — treat no exception as success
+    const resp = await Promise.race([fetch(url), writeTimeout]);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const result = await resp.json();
+    if (result.status !== 'ok') throw new Error(result.error || 'Unknown error from Apps Script');
   } catch(e) {
     if (e.message === 'TIMEOUT') throw new Error('Request timed out — check your Apps Script URL');
     throw e;
